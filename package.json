@@ -1,0 +1,27 @@
+{
+  "name": "@ziqx/auth",
+  "version": "0.0.1",
+  "description": "SDK for Ziqx Authentication",
+  "main": "./dist/index.ts",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "homepage": "ziqx.cc",
+  "access": "public",
+  "repository": {
+    "url": "https://github.com/ziqx/ziqx-auth-js"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "keywords": [
+    "zauth",
+    "ziqx auth",
+    "ziqx.js"
+  ],
+  "author": "Fathah KA",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.5"
+  }
+}
