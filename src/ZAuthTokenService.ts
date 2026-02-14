@@ -1,4 +1,5 @@
-import { VALIDATION_URL } from "./constants";
+import { TOKEN_URL, VALIDATION_URL, VALIDATION_URL_V2 } from "./constants";
+import { GetAuthTokenParams } from "./types";
 
 /**
  * ZAuthTokenService - A simple token validation service for ZIQX Auth.
@@ -38,7 +39,7 @@ export class ZAuthTokenService {
     }
 
     try {
-      const response = await fetch(VALIDATION_URL, {
+      const response = await fetch(VALIDATION_URL_V2, {
         method: "GET",
         headers: {
           Authorization: token,
@@ -53,5 +54,46 @@ export class ZAuthTokenService {
       console.error("ZAuthTokenService: Validation failed:", error);
       return false;
     }
+  }
+
+  /**
+   * Exchanges an authorization code for an access token.
+   *
+   * @param params - The parameters required to exchange the code for a token.
+   * @param params.authAppKey - The application key.
+   * @param params.authSecret - The application secret.
+   * @param params.code - The authorization code received from the callback.
+   * @param params.codeVerifier - The code verifier used in PKCE.
+   * @param params.redirectUri - The redirect URI used in the initial request.
+   * @returns A Promise that resolves to the token response data.
+   */
+  async getAuthToken({
+    authAppKey,
+    authSecret,
+    code,
+    codeVerifier,
+    redirectUri,
+  }: GetAuthTokenParams): Promise<any> {
+    if (!authAppKey || !authSecret || !code || !codeVerifier || !redirectUri) {
+      throw new Error("ZAuthTokenService: All parameters are required");
+    }
+
+    const response = await fetch(TOKEN_URL, {
+      method: "POST",
+      body: JSON.stringify({
+        code,
+        grant_type: "authorization_code",
+        code_verifier: codeVerifier,
+        redirect_uri: redirectUri,
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        "x-app-key": authAppKey,
+        "x-app-secret": authSecret,
+      },
+    });
+
+    const data = await response.json();
+    return data;
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@ziqx/auth",
-  "version": "0.0.4",
+  "version": "1.0.0",
   "description": "SDK for Ziqx Authentication",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
