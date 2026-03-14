@@ -1,5 +1,5 @@
 ---
-name: ziqx_auth_sdk
+name: ziqx-auth-sdk
 description: SDK for Ziqx Authentication providing client-side login redirection and server-side token validation.
 ---
 
