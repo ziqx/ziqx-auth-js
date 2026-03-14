@@ -41,14 +41,6 @@ const auth = new ZAuthClient({
 auth.login(); // Redirects to live auth environment
 ```
 
-### Trigger Login in Development Mode
-
-If you're working in a development environment, enable dev mode:
-
-```typescript
-auth.login(true); // Redirects to dev auth environment (http://localhost:3000/zauth)
-```
-
 ---
 
 ## Access Token Exchange
@@ -98,36 +90,36 @@ if (isValid) {
 ```typescript
 new ZAuthClient(options: {
   authKey: string;
-  redirectUrl: string;
-  codeChallenge: string;
-  codeChallengeMethod?: string;
-  state?: string;
+
 });
 ```
 
+| Parameter | Type   | Required | Description                               |
+| --------- | ------ | -------- | ----------------------------------------- |
+| `authKey` | string | ✅ Yes   | Your unique authentication key from ZIQX. |
+
+#### Methods
+
+##### `login(): void`
+
+Redirects the user to the ZIQX authentication portal.
+
 | Parameter             | Type   | Required | Description                                                       |
 | --------------------- | ------ | -------- | ----------------------------------------------------------------- |
-| `authKey`             | string | ✅ Yes   | Your unique authentication key from ZIQX.                         |
 | `redirectUrl`         | string | ✅ Yes   | The URL where the user should be redirected after authentication. |
 | `codeChallenge`       | string | ✅ Yes   | The code challenge for PKCE flow.                                 |
 | `codeChallengeMethod` | string | ❌ No    | (Optional) The code challenge method (e.g., "S256").              |
 | `state`               | string | ❌ No    | (Optional) An opaque value used to maintain state.                |
 
-#### Methods
-
-##### `login(isDev?: boolean): void`
-
-Redirects the user to the ZIQX authentication portal.
-
-| Parameter | Type    | Default | Description                                              |
-| --------- | ------- | ------- | -------------------------------------------------------- |
-| `isDev`   | boolean | `false` | Set `true` to redirect to the dev authentication portal. |
-
 **Example:**
 
 ```typescript
-auth.login(); // Redirects to production portal
-auth.login(true); // Redirects to development portal
+auth.login({
+  redirectUrl: "";
+  codeChallenge: "";
+  codeChallengeMethod: "";
+  state: "";
+  }); // Redirects to production portal
 ```
 
 ---
@@ -213,7 +205,6 @@ if (token) {
 ## Notes
 
 - Make sure your `authKey` is valid and corresponds to your environment.
-- Use `auth.login(true)` in development mode (e.g., on localhost or staging).
 - The `ZAuthTokenService` uses `https://ziqx.cc/api/auth/validate-token` internally for V1 and `https://ziqx.cc/zauth/validate` for V2.
 - This SDK is for **client-side use** only.
 
