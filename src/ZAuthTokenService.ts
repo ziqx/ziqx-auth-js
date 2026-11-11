@@ -1,61 +1,57 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import {
-  JWKS_URL,
-  TOKEN_ISSUER,
-  TOKEN_URL,
-  VALIDATION_URL,
-  VALIDATION_URL_V2,
-} from "./constants";
-import {
+import { endpoints, TOKEN_ISSUER } from "./constants";
+import type {
+  ClientCredentials,
   GetAuthTokenParams,
   VerifyOptions,
+  ZAuthOptions,
   ZAuthTokenPayload,
+  ZAuthTokenResponse,
 } from "./types";
 
 /**
- * Lazily-created, cached remote key set. `createRemoteJWKSet` keeps an internal
- * cache of the fetched keys, so it must be created once and reused — recreating
- * it per call would refetch the JWKS every time.
+ * Remote key sets, one per JWKS URL. `createRemoteJWKSet` keeps an internal
+ * cache of the fetched keys, so each must be created once and reused —
+ * recreating it per call would refetch the JWKS every time.
  */
-let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
-function getJwks() {
+const keySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+function getJwks(url: string) {
+  let jwks = keySets.get(url);
   if (!jwks) {
-    jwks = createRemoteJWKSet(new URL(JWKS_URL));
+    jwks = createRemoteJWKSet(new URL(url));
+    keySets.set(url, jwks);
   }
   return jwks;
 }
 
 /**
- * ZAuthTokenService - A simple token validation service for ZIQX Auth.
- *
- * This class provides a method to validate authentication tokens issued by ZIQX.
+ * ZAuthTokenService - Exchanges authorization codes and verifies ZIQX tokens.
  *
  * Example:
  * ```ts
  * import { ZAuthTokenService } from "@ziqx/auth";
  *
  * const tokenService = new ZAuthTokenService();
- * const isValid = await tokenService.validate("your-jwt-token");
- *
- * if (isValid) {
- *   console.log("Token is valid");
- * } else {
- *   console.log("Invalid or expired token");
- * }
+ * const claims = await tokenService.verify(token, { appKey: "zdev_…" });
  * ```
  */
 export class ZAuthTokenService {
+  private urls: ReturnType<typeof endpoints>;
+
+  /**
+   * @param options.baseUrl - (Optional) Ziqx host; defaults to `https://ziqx.cc`.
+   */
+  constructor({ baseUrl }: ZAuthOptions = {}) {
+    this.urls = endpoints(baseUrl);
+  }
+
   /**
    * Verifies a ZIQX OAuth token **locally** using the published public key
    * (ES256), without a network round-trip per request. The public key is
    * fetched once from the JWKS endpoint and cached.
    *
-   * This is the recommended replacement for {@link validate}: it is faster,
-   * works offline after the first key fetch, and cannot be tricked by a
-   * compromised network path since the signature is checked cryptographically.
-   *
    * @param token - The OAuth token to verify. A leading `"Bearer "` is allowed.
-   * @param options - See {@link VerifyOptions}. Pass `appId` to assert the token's audience.
+   * @param options - Pass `appKey` to assert the token was issued for your app.
    * @returns The verified token claims.
    * @throws If the token is missing, malformed, expired, has the wrong issuer/audience, or fails signature verification.
    *
@@ -63,7 +59,7 @@ export class ZAuthTokenService {
    * ```ts
    * const tokenService = new ZAuthTokenService();
    * try {
-   *   const claims = await tokenService.verify(token, { appId: "your-app-id" });
+   *   const claims = await tokenService.verify(token, { appKey: "zdev_…" });
    *   console.log(claims.sub, claims.email);
    * } catch {
    *   // invalid / expired token
@@ -80,41 +76,49 @@ export class ZAuthTokenService {
 
     const jwt = token.replace(/^Bearer\s+/i, "");
 
-    const { payload } = await jwtVerify(jwt, getJwks(), {
+    const { payload } = await jwtVerify(jwt, getJwks(this.urls.jwks), {
+      algorithms: ["ES256"],
       issuer: TOKEN_ISSUER,
-      audience: options?.appId,
+      // Tokens use the app key as their audience (same as `azp`).
+      audience: options?.appKey ?? options?.appId,
     });
 
     return payload as ZAuthTokenPayload;
   }
 
   /**
-   * Validates a given authentication token with the ZIQX Auth API.
+   * Validates a token with the ZIQX Auth API.
    *
-   * @deprecated Use {@link verify} instead. `validate` makes a network call to
-   * the ZIQX validation endpoint on every request; `verify` checks the token
-   * locally against the public key and returns the decoded claims. This method
-   * remains for backward compatibility and will be removed in a future release.
+   * @deprecated Use {@link verify} instead: it checks the token locally and
+   * returns its claims. The validation endpoint requires your client
+   * credentials, so pass them as the second argument; without them this
+   * always resolves to `false`.
    *
-   * @param token - The authentication token (JWT or similar) to validate.
-   * @returns A Promise that resolves to `true` if the token is valid, otherwise `false`.
-   *
-   * @example
-   * ```ts
-   * const tokenService = new ZAuthTokenService();
-   * const isValid = await tokenService.validate("your-jwt-token");
-   * ```
+   * @param token - The access token (a leading `"Bearer "` is allowed).
+   * @param credentials - Your app key and client secret.
+   * @returns `true` if the token is valid for your app, otherwise `false`.
    */
-  async validate(token: string): Promise<boolean> {
+  async validate(
+    token: string,
+    credentials?: ClientCredentials,
+  ): Promise<boolean> {
     if (!token) {
       throw new Error("ZAuthTokenService: token is required for validation.");
     }
+    if (!credentials?.appKey || !credentials.appSecret) {
+      console.warn(
+        "ZAuthTokenService: validate() needs { appKey, appSecret }. Prefer verify().",
+      );
+      return false;
+    }
 
     try {
-      const response = await fetch(VALIDATION_URL_V2, {
+      const response = await fetch(this.urls.validate, {
         method: "GET",
         headers: {
-          Authorization: token,
+          Authorization: `Bearer ${token.replace(/^Bearer\s+/i, "")}`,
+          "x-app-key": credentials.appKey,
+          "x-app-secret": credentials.appSecret,
         },
       });
 
@@ -129,15 +133,17 @@ export class ZAuthTokenService {
   }
 
   /**
-   * Exchanges an authorization code for an access token.
+   * Exchanges an authorization code for an access token. Call this on your
+   * server: it sends your client secret.
    *
-   * @param params - The parameters required to exchange the code for a token.
-   * @param params.authAppKey - The application key.
-   * @param params.authSecret - The application secret.
-   * @param params.code - The authorization code received from the callback.
-   * @param params.codeVerifier - The code verifier used in PKCE.
-   * @param params.redirectUri - The redirect URI used in the initial request.
-   * @returns A Promise that resolves to the token response data.
+   * Resolves with the endpoint's JSON either way; check for `access_token`
+   * (success) or `error` (failure).
+   *
+   * @param params.authAppKey - Your app key.
+   * @param params.authSecret - Your client secret.
+   * @param params.code - The `code` from the callback URL.
+   * @param params.codeVerifier - The PKCE verifier you kept from `createPkce`.
+   * @param params.redirectUri - The same redirect URL used to sign in.
    */
   async getAuthToken({
     authAppKey,
@@ -145,12 +151,12 @@ export class ZAuthTokenService {
     code,
     codeVerifier,
     redirectUri,
-  }: GetAuthTokenParams): Promise<any> {
+  }: GetAuthTokenParams): Promise<ZAuthTokenResponse> {
     if (!authAppKey || !authSecret || !code || !codeVerifier || !redirectUri) {
       throw new Error("ZAuthTokenService: All parameters are required");
     }
 
-    const response = await fetch(TOKEN_URL, {
+    const response = await fetch(this.urls.token, {
       method: "POST",
       body: JSON.stringify({
         code,
@@ -165,7 +171,11 @@ export class ZAuthTokenService {
       },
     });
 
-    const data = await response.json();
-    return data;
+    const data = await response.json().catch(() => null);
+    return (
+      data ?? {
+        error: response.ok ? "server_error" : "temporarily_unavailable",
+      }
+    );
   }
 }

@@ -1,6 +1,8 @@
 # @ziqx/auth
 
-A lightweight authentication SDK for ZIQX platforms. Provides an easy interface to trigger the authentication flow and validate tokens from your frontend.
+A lightweight SDK for **Sign in with Ziqx**: send users to the Ziqx sign-in page with PKCE, exchange the code on your server, and verify tokens locally.
+
+Works with apps created in [Ziqx Developers](https://developers.ziqx.cc) (`zdev_…` app keys) and with older apps.
 
 ---
 
@@ -10,227 +12,151 @@ A lightweight authentication SDK for ZIQX platforms. Provides an easy interface 
 npm install @ziqx/auth
 ```
 
-or
-
-```bash
-yarn add @ziqx/auth
-```
-
 ---
 
-## Usage
+## Quick start
 
-### Import and Initialize
+You need three values from **Ziqx Developers → your app → Auth**:
+
+- **App key** (public, e.g. `zdev_…`)
+- **Client secret** (server only; shown once when created or rotated)
+- A **redirect URL** you added under _Redirect URLs_ (must match exactly)
+
+### 1. Send the user to sign in (browser)
 
 ```typescript
-import { ZAuthClient } from "@ziqx/auth";
+import { ZAuthClient, createPkce } from "@ziqx/auth";
 
-const auth = new ZAuthClient({
-  authKey: "YOUR_AUTH_KEY",
-  redirectUrl: "YOUR_REDIRECT_URL",
-  codeChallenge: "YOUR_CODE_CHALLENGE",
-  // Optional parameters
-  // codeChallengeMethod: "S256",
-  // state: "YOUR_STATE_STRING"
+const auth = new ZAuthClient({ authKey: "zdev_…" });
+
+const { verifier, challenge } = await createPkce();
+// Keep the verifier until the callback (e.g. a cookie your server can read).
+document.cookie = `zauth_verifier=${verifier}; Path=/; Secure; SameSite=Lax`;
+
+auth.login({
+  redirectUrl: "https://app.example.com/auth/callback",
+  codeChallenge: challenge,
+  codeChallengeMethod: "S256",
+  state: crypto.randomUUID(), // check it on the callback
 });
 ```
 
-### Trigger Login
+Need the URL on the server instead? Use `auth.getLoginUrl({ ... })`.
 
-```typescript
-auth.login(); // Redirects to live auth environment
-```
+### 2. Exchange the code (server)
 
----
-
-## Access Token Exchange
-
-You can use the `ZAuthTokenService` class to exchange an authorization code for an access token.
+Ziqx redirects back to your redirect URL with `?code=…&state=…`.
 
 ```typescript
 import { ZAuthTokenService } from "@ziqx/auth";
 
 const tokenService = new ZAuthTokenService();
 
-const tokenData = await tokenService.getAuthToken({
-  authAppKey: "your-app-key",
-  authSecret: "your-app-secret",
-  code: "authorization-code",
-  codeVerifier: "code-verifier",
-  redirectUri: "redirect-uri",
+const result = await tokenService.getAuthToken({
+  authAppKey: process.env.ZAUTH_APP_KEY!,
+  authSecret: process.env.ZAUTH_SECRET!,
+  code,
+  codeVerifier: verifier, // from step 1
+  redirectUri: "https://app.example.com/auth/callback",
 });
-```
 
-## Token Verification
-
-Use `ZAuthTokenService.verify()` to verify a token **locally** against ZIQX's
-public key (ES256). The public key is fetched once from the JWKS endpoint and
-cached, so there's no network round-trip per request, and a token cannot be
-forged or tampered with without ZIQX's private key.
-
-```typescript
-import { ZAuthTokenService } from "@ziqx/auth";
-
-const tokenService = new ZAuthTokenService();
-
-try {
-  // Pass your app id to also assert the token's audience (`aud`).
-  const claims = await tokenService.verify("your-jwt-token", {
-    appId: "your-app-id",
-  });
-  console.log("Authenticated user:", claims.sub, claims.email);
-} catch {
-  console.log("Invalid or expired token");
+if ("access_token" in result) {
+  // Store result.access_token in an httpOnly cookie.
+} else {
+  console.error(result.error); // e.g. "invalid_grant"
 }
 ```
 
-> **Deprecated:** `validate()` / `validateV2()` call the ZIQX validation
-> endpoint over the network on every request. Prefer `verify()`, which is
-> faster, works offline after the first key fetch, and returns the decoded
-> claims. The old methods still work but will be removed in a future release.
+### 3. Verify tokens (server or browser)
+
+`verify()` checks the token **locally** against Ziqx's public key (ES256). The key is fetched once from the JWKS endpoint and cached.
+
+```typescript
+try {
+  const claims = await tokenService.verify(token, { appKey: "zdev_…" });
+  console.log(claims.sub, claims.email);
+} catch {
+  // invalid, expired, or issued for another app
+}
+```
+
+> Tokens use your **app key** as their audience (`aud`, same as `azp`). Pass `appKey`, not the app ID.
+
+---
+
+## Local development
+
+Point both classes at a local core-web:
+
+```typescript
+const auth = new ZAuthClient({ authKey: "zdev_…", baseUrl: "http://localhost:3000" });
+const tokenService = new ZAuthTokenService({ baseUrl: "http://localhost:3000" });
+```
+
+Plain HTTP redirect URLs are allowed only on `localhost`.
 
 ---
 
 ## API Reference
 
+### `createPkce(): Promise<{ verifier, challenge, method: "S256" }>`
+
+Creates an S256 PKCE pair (43-character verifier and challenge). Works in browsers and Node 18+.
+
 ### Class: `ZAuthClient`
 
-#### Constructor
-
 ```typescript
-new ZAuthClient(options: {
-  authKey: string;
-
-});
+new ZAuthClient({ authKey: string, baseUrl?: string })
 ```
 
-| Parameter | Type   | Required | Description                               |
-| --------- | ------ | -------- | ----------------------------------------- |
-| `authKey` | string | ✅ Yes   | Your unique authentication key from ZIQX. |
+#### `login(options: LoginOptions): void` / `getLoginUrl(options: LoginOptions): string`
 
-#### Methods
-
-##### `login(): void`
-
-Redirects the user to the ZIQX authentication portal.
-
-| Parameter             | Type   | Required | Description                                                       |
-| --------------------- | ------ | -------- | ----------------------------------------------------------------- |
-| `redirectUrl`         | string | ✅ Yes   | The URL where the user should be redirected after authentication. |
-| `codeChallenge`       | string | ✅ Yes   | The code challenge for PKCE flow.                                 |
-| `codeChallengeMethod` | string | ❌ No    | (Optional) The code challenge method (e.g., "S256").              |
-| `state`               | string | ❌ No    | (Optional) An opaque value used to maintain state.                |
-
-**Example:**
-
-```typescript
-auth.login({
-  redirectUrl: "";
-  codeChallenge: "";
-  codeChallengeMethod: "";
-  state: "";
-  }); // Redirects to production portal
-```
-
----
+| Option                | Type               | Required | Description                                                                                              |
+| --------------------- | ------------------ | -------- | -------------------------------------------------------------------------------------------------------- |
+| `redirectUrl`         | string             | ✅ Yes   | Exact redirect URL registered for your app.                                                              |
+| `codeChallenge`       | string             | ✅ Yes   | PKCE challenge from `createPkce()`.                                                                      |
+| `codeChallengeMethod` | `"S256"`           | ❌ No    | Use `"S256"`. When omitted the challenge is treated as a plain verifier (kept for older integrations).  |
+| `state`               | string             | ❌ No    | Returned unchanged on the callback.                                                                      |
+| `scope`               | string \| string[] | ❌ No    | `openid` plus `email` and/or `profile`. Defaults to `openid email profile`.                              |
 
 ### Class: `ZAuthTokenService`
 
-#### Methods
-
-##### `verify(token: string, options?: VerifyOptions): Promise<ZAuthTokenPayload>`
-
-Verifies a token locally against ZIQX's public key (ES256) and returns the
-decoded claims. Throws if the token is missing, malformed, expired, or fails
-signature / issuer / audience checks. A leading `"Bearer "` is allowed.
-
-| Parameter        | Type   | Required | Description                                                          |
-| ---------------- | ------ | -------- | -------------------------------------------------------------------- |
-| `token`          | string | ✅ Yes   | The OAuth token to verify.                                           |
-| `options.appId`  | string | ❌ No    | When provided, the token's `aud` claim must match this app id.       |
-
-##### `validate(token: string): Promise<boolean>` _(deprecated)_
-
-> **Deprecated — use `verify()`.** Validates a token by calling the ZIQX Auth
-> API over the network. Kept for backward compatibility.
-
-| Parameter | Type   | Required | Description                                |
-| --------- | ------ | -------- | ------------------------------------------ |
-| `token`   | string | ✅ Yes   | The authentication token (JWT or similar). |
-
-##### `getAuthToken(params: GetAuthTokenParams): Promise<any>`
-
-Exchanges an authorization code for an access token.
-
-**Parameters:**
-
-| Parameter      | Type   | Required | Description                                        |
-| -------------- | ------ | -------- | -------------------------------------------------- |
-| `authAppKey`   | string | ✅ Yes   | The application key.                               |
-| `authSecret`   | string | ✅ Yes   | The application secret.                            |
-| `code`         | string | ✅ Yes   | The authorization code received from the callback. |
-| `codeVerifier` | string | ✅ Yes   | The code verifier used in PKCE.                    |
-| `redirectUri`  | string | ✅ Yes   | The redirect URI used in the initial request.      |
-
-**Example:**
-
 ```typescript
-const tokenService = new ZAuthTokenService();
-const tokenData = await tokenService.getAuthToken({
-  authAppKey: "your-app-key",
-  authSecret: "your-app-secret",
-  code: "authorization-code",
-  codeVerifier: "code-verifier",
-  redirectUri: "redirect-uri",
-});
+new ZAuthTokenService({ baseUrl?: string })
 ```
 
----
+#### `verify(token, options?): Promise<ZAuthTokenPayload>`
 
-## Example Implementation
+Verifies signature, issuer (`ziqx.cc`) and expiry. A leading `"Bearer "` is allowed.
 
-```typescript
-import { ZAuthClient, ZAuthTokenService } from "@ziqx/auth";
+| Option           | Type   | Description                                                |
+| ---------------- | ------ | ---------------------------------------------------------- |
+| `options.appKey` | string | Your app key. The token's audience must match it.          |
+| `options.appId`  | string | _Deprecated_ alias of `appKey`; must still be the app key. |
 
-const auth = new ZAuthClient({
-  authKey: "12345-xyz",
-  redirectUrl: "https://myapp.com/callback",
-  codeChallenge: "pkce-challenge-string",
-});
+Claims: `sub` (user's Ziqx open id), `azp`/`aud` (app key), `iss`, `iat`, `exp`, `email`, `username`, `fullname`, `phone`. For Ziqx Developers apps, `email` needs the `email` scope, `username`/`fullname` need `profile`, and `phone` is always empty.
 
-// Login
-const loginBtn = document.getElementById("loginBtn");
-loginBtn?.addEventListener("click", () => {
-  auth.login();
-});
+#### `getAuthToken(params): Promise<ZAuthTokenResponse>`
 
-// Token verification example
-const tokenService = new ZAuthTokenService();
-const token = localStorage.getItem("ziqx_token");
+Exchanges an authorization code. Server only: it sends your client secret.
 
-if (token) {
-  try {
-    const claims = await tokenService.verify(token, { appId: "12345-xyz" });
-    console.log("Authenticated user:", claims.sub);
-  } catch {
-    console.log("Invalid or expired token");
-  }
-}
-```
+| Parameter      | Type   | Description                              |
+| -------------- | ------ | ---------------------------------------- |
+| `authAppKey`   | string | Your app key.                            |
+| `authSecret`   | string | Your client secret.                      |
+| `code`         | string | The `code` from the callback URL.        |
+| `codeVerifier` | string | The PKCE verifier from `createPkce()`.   |
+| `redirectUri`  | string | The same redirect URL used to sign in.   |
 
----
+Resolves to `{ access_token, token_type: "Bearer", id_token }` or `{ error }` (`invalid_request`, `invalid_client`, `invalid_grant`, `unsupported_grant_type`, `temporarily_unavailable`, `server_error`). Codes are single use and expire quickly.
 
-## Notes
+#### `validate(token, { appKey, appSecret }): Promise<boolean>` _(deprecated)_
 
-- Make sure your `authKey` is valid and corresponds to your environment.
-- `verify()` fetches the public key from `https://ziqx.cc/zauth/jwks.json` (cached after first use). The deprecated `validate()` calls `https://ziqx.cc/zauth/validate` over the network.
-- `verify()` works both client-side and server-side. The `getAuthToken()` exchange (which uses your app secret) should only run on a trusted server.
+Checks a token over the network. The endpoint requires your client credentials; without them this resolves to `false`. Prefer `verify()`.
 
 ---
 
 ## AI Agent Skills
-
-If you are using an AI agent (like Antigravity), you can add `ziqx-auth-js` related skills to your agent using the following command:
 
 ```bash
 npx skills add ziqx/ziqx-ai-skills

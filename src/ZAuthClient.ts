@@ -1,72 +1,84 @@
-import { ZAUTH_BASE_URL } from "./constants";
+import { endpoints } from "./constants";
+import type { LoginOptions, ZAuthOptions } from "./types";
 
 /**
  * ZAuthClient - A lightweight authentication client for ZIQX Auth.
  *
- * This class facilitates redirection to the ZIQX authentication gateway.
+ * Sends the user to the Ziqx sign-in page with an S256 PKCE challenge.
  *
  * Example:
  * ```ts
- * import { ZAuthClient } from "@ziqx/auth";
+ * import { ZAuthClient, createPkce } from "@ziqx/auth";
  *
- * const auth = new ZAuthClient({
- *   authKey: "your-auth-key",
- * });
+ * const auth = new ZAuthClient({ authKey: "zdev_…" });
+ * const { verifier, challenge } = await createPkce();
+ * sessionStorage.setItem("zauth_verifier", verifier);
  *
- * // Redirects user to ZIQX Auth
  * auth.login({
- *  redirectUrl:"",
- * codeChallenge:"",
- * codeChallengeMethod:"",
- *  state:"",
+ *   redirectUrl: "https://app.example.com/auth/callback",
+ *   codeChallenge: challenge,
+ *   codeChallengeMethod: "S256",
+ *   state: crypto.randomUUID(),
  * });
  * ```
  */
 export class ZAuthClient {
   private authKey: string;
-  private codeChallengeMethod?: string;
-  private state?: string;
+  private authorizeUrl: string;
 
   /**
    * Creates a new ZAuthClient instance.
-   * @param options - The configuration options.
-   * @param options.authKey - The authentication key provided by ZIQX.
+   * @param options.authKey - Your app key (Auth → Client credentials → App key).
+   * @param options.baseUrl - (Optional) Ziqx host; defaults to `https://ziqx.cc`.
    * @throws Will throw an error if `authKey` is missing.
    */
-  constructor({ authKey }: { authKey: string }) {
+  constructor({ authKey, baseUrl }: { authKey: string } & ZAuthOptions) {
     if (!authKey) {
       throw new Error(
         "ZAuthClient: Missing required parameters. `authKey` is required.",
       );
     }
     this.authKey = authKey;
+    this.authorizeUrl = endpoints(baseUrl).authorize;
   }
 
   /**
-   * Redirects the user to the ZIQX authentication page.
-   * @param options.redirectUrl - The URL where the user should be redirected after authentication.
-   * @param options.codeChallenge - The code challenge for PKCE flow.
-   * @param options.codeChallengeMethod - (Optional) The code challenge method (e.g., "S256"). Default is "plaintext".
-   * @param options.state - (Optional) An opaque value used to maintain state between the request and the callback.
+   * Builds the sign-in URL without navigating, for server-side redirects.
+   * @throws If `redirectUrl` or `codeChallenge` is missing.
    */
-  login({
+  getLoginUrl({
     redirectUrl,
     codeChallenge,
     codeChallengeMethod,
     state,
-  }: {
-    redirectUrl?: string;
-    codeChallenge?: string;
-    codeChallengeMethod?: string;
-    state?: string;
-  }): void {
-    const stateQuery = state ? `&state=${state}` : "";
-    const codeChallengeMethodQuery = codeChallengeMethod
-      ? `&challenge_method=${codeChallengeMethod}`
-      : "";
-    const loginUrl = `${ZAUTH_BASE_URL}?key=${this.authKey}&redir=${redirectUrl}&code_challenge=${codeChallenge}${codeChallengeMethodQuery}${stateQuery}`;
+    scope,
+  }: LoginOptions): string {
+    if (!redirectUrl || !codeChallenge) {
+      throw new Error(
+        "ZAuthClient: `redirectUrl` and `codeChallenge` are required.",
+      );
+    }
+    const query = new URLSearchParams({
+      key: this.authKey,
+      redir: redirectUrl,
+      code_challenge: codeChallenge,
+    });
+    if (codeChallengeMethod) query.set("challenge_method", codeChallengeMethod);
+    if (state) query.set("state", state);
+    if (scope)
+      query.set("scope", Array.isArray(scope) ? scope.join(" ") : scope);
+    return `${this.authorizeUrl}?${query}`;
+  }
 
-    // Redirect user to the authentication page
-    window.location.href = loginUrl;
+  /**
+   * Redirects the user to the ZIQX authentication page.
+   * @param options.redirectUrl - Exact redirect URL registered for your app.
+   * @param options.codeChallenge - PKCE challenge (see `createPkce`).
+   * @param options.codeChallengeMethod - (Optional) `"S256"` (recommended). When omitted the challenge is treated as a plain verifier.
+   * @param options.state - (Optional) An opaque value returned on the callback.
+   * @param options.scope - (Optional) Scopes; defaults to `openid email profile`.
+   */
+  login(options: LoginOptions): void {
+    window.location.href = this.getLoginUrl(options);
   }
 }

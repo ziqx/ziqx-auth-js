@@ -1,267 +1,131 @@
 ---
 name: ziqx-auth-sdk
-description: SDK for Ziqx Authentication providing client-side login redirection and server-side token validation.
+description: SDK for Ziqx Authentication (Sign in with Ziqx) — S256 PKCE login redirection, server-side code exchange, and local token verification. Works with Ziqx Developers apps (zdev_ keys) and older apps.
 ---
 
 # Ziqx Auth SDK Skill
 
-This skill provides comprehensive instructions for using the `@ziqx/auth` SDK in JavaScript/TypeScript applications, with specific focus on Next.js integration using Server Actions.
+How to use `@ziqx/auth` in JavaScript/TypeScript apps, with a focus on Next.js (App Router).
+
+## What the app needs (from Ziqx Developers → app → Auth)
+
+- **App key** — public, e.g. `zdev_…`. Safe in `NEXT_PUBLIC_` variables.
+- **Client secret** — server only. Shown once at creation or rotation.
+- **Redirect URL** — must be added under _Redirect URLs_ and match **exactly** (HTTPS, or `http://localhost`).
 
 ## Library Architecture
 
-The SDK consists of two primary classes:
+- **`createPkce()`** — makes an S256 PKCE pair (`verifier`, `challenge`). Browser and Node 18+.
+- **`ZAuthClient`** — builds the sign-in URL (`getLoginUrl`) or redirects (`login`, browser only).
+- **`ZAuthTokenService`** — exchanges codes (`getAuthToken`, server only) and verifies tokens locally (`verify`).
 
-- **`ZAuthClient`**: Handles user-facing interactions like login redirection. It uses `window.location.href` and is **Client-Only**.
-- **`ZAuthTokenService`**: Handles back-end operations like token exchange and validation. It uses `fetch` and is **Server-Compatible** (though it can also be used on the client if necessary).
+| Method                           | Environment  | Description                                    |
+| :------------------------------- | :----------- | :--------------------------------------------- |
+| `createPkce`                     | Node/Browser | S256 verifier + challenge.                     |
+| `ZAuthClient.login`              | Browser      | Redirects to Ziqx sign-in.                     |
+| `ZAuthClient.getLoginUrl`        | Node/Browser | Sign-in URL for server redirects.              |
+| `ZAuthTokenService.getAuthToken` | Server       | Exchanges a code for a token (uses secret).    |
+| `ZAuthTokenService.verify`       | Node/Browser | Verifies a token locally (ES256 via JWKS).     |
+| `ZAuthTokenService.validate`     | Server       | _Deprecated._ Needs `{ appKey, appSecret }`.   |
 
-## Environment Compatibility
+Rules:
 
-| Method                           | Component Type   | Environment  | Description                         |
-| :------------------------------- | :--------------- | :----------- | :---------------------------------- |
-| `ZAuthClient.login`              | Client Component | Browser      | Redirects to Ziqx Auth gateway.     |
-| `ZAuthTokenService.validate`     | Server/Client    | Node/Browser | Validates a JWT/Token.              |
-| `ZAuthTokenService.getAuthToken` | Server/Client    | Node/Browser | Exchanges an auth code for a token. |
-
-> [!IMPORTANT]
-> Always perform token exchange (`getAuthToken`) and sensitive validation on the **Server** to protect your `authSecret`.
-
-## Core Usage Examples
-
-### 1. Simple Login (Client-Side)
-
-```typescript
-import { ZAuthClient } from "@ziqx/auth";
-
-const auth = new ZAuthClient({ authKey: "YOUR_AUTH_KEY" });
-
-// Trigger login flow
-auth.login({
-  redirectUrl: "https://your-app.com/callback",
-  codeChallenge: "PKCE_CHALLENGE_STRING",
-  state: "OPTIONAL_STATE",
-});
-```
-
-### 2. Token Validation
-
-```typescript
-import { ZAuthTokenService } from "@ziqx/auth";
-
-const tokenService = new ZAuthTokenService();
-const isValid = await tokenService.validate("USER_JWT_TOKEN");
-```
+- Always use `codeChallengeMethod: "S256"` with `createPkce()`. Never send the verifier as the challenge.
+- Tokens use the **app key** as audience: `verify(token, { appKey })`. Do not pass the app ID.
+- `getAuthToken` resolves with `{ access_token, … }` or `{ error }`; check which.
+- For a local core-web, pass `baseUrl: "http://localhost:3000"` to both classes.
 
 ## Next.js Integration (App Router)
 
-### Client Button for Login
+### 1. Start sign-in (Route Handler)
 
-Use a Client Component for the login button as it requires browser APIs.
+Create the PKCE pair on the server, keep the verifier and state in httpOnly cookies, and redirect.
 
-```tsx
-"use client";
-import { ZAuthClient } from "@ziqx/auth";
+```typescript
+// app/auth/login/route.ts
+import { NextResponse } from "next/server";
+import { ZAuthClient, createPkce } from "@ziqx/auth";
 
-export function LoginButton() {
-  const handleLogin = () => {
-    const auth = new ZAuthClient({
-      authKey: process.env.NEXT_PUBLIC_ZAUTH_KEY!,
-    });
-    auth.login({
-      redirectUrl: `${window.location.origin}/api/auth/callback`,
-      codeChallenge: "...", // Generate this dynamically
-    });
-  };
+export async function GET() {
+  const { verifier, challenge } = await createPkce();
+  const state = crypto.randomUUID();
+  const auth = new ZAuthClient({ authKey: process.env.ZAUTH_APP_KEY! });
 
-  return <button onClick={handleLogin}>Login with Ziqx</button>;
+  const response = NextResponse.redirect(
+    auth.getLoginUrl({
+      redirectUrl: process.env.ZAUTH_REDIRECT_URL!,
+      codeChallenge: challenge,
+      codeChallengeMethod: "S256",
+      state,
+    }),
+  );
+  const cookie = { httpOnly: true, secure: true, sameSite: "lax" as const, path: "/", maxAge: 600 };
+  response.cookies.set("zauth_verifier", verifier, cookie);
+  response.cookies.set("zauth_state", state, cookie);
+  return response;
 }
 ```
 
-### Server Actions for Token Exchange
+A login button then just links to `/auth/login`.
 
-Perform the code-to-token exchange in a Server Action to keep your `authSecret` private.
+### 2. Callback: exchange the code
 
 ```typescript
-// app/actions/auth.ts
-"use server";
-
+// app/auth/callback/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { ZAuthTokenService } from "@ziqx/auth";
+
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get("code");
+  const state = request.nextUrl.searchParams.get("state");
+  const verifier = request.cookies.get("zauth_verifier")?.value;
+  if (!code || !verifier || state !== request.cookies.get("zauth_state")?.value)
+    return NextResponse.redirect(new URL("/login?error=state", request.url));
+
+  const result = await new ZAuthTokenService().getAuthToken({
+    authAppKey: process.env.ZAUTH_APP_KEY!,
+    authSecret: process.env.ZAUTH_SECRET!,
+    code,
+    codeVerifier: verifier,
+    redirectUri: process.env.ZAUTH_REDIRECT_URL!,
+  });
+  if (!("access_token" in result))
+    return NextResponse.redirect(new URL(`/login?error=${result.error}`, request.url));
+
+  const response = NextResponse.redirect(new URL("/", request.url));
+  response.cookies.set("session", result.access_token, { httpOnly: true, secure: true, sameSite: "lax", path: "/" });
+  response.cookies.delete("zauth_verifier");
+  response.cookies.delete("zauth_state");
+  return response;
+}
+```
+
+### 3. Read the session (Server Components, Route Handlers)
+
+```typescript
+// lib/session.ts
 import { cookies } from "next/headers";
+import { ZAuthTokenService } from "@ziqx/auth";
 
-export async function handleAuthCode(code: string, codeVerifier: string) {
-  const tokenService = new ZAuthTokenService();
+const tokenService = new ZAuthTokenService();
 
+export async function getSession() {
+  const token = (await cookies()).get("session")?.value;
+  if (!token) return null;
   try {
-    const tokenData = await tokenService.getAuthToken({
-      authAppKey: process.env.ZAUTH_APP_KEY!,
-      authSecret: process.env.ZAUTH_SECRET!,
-      code,
-      codeVerifier,
-      redirectUri: process.env.ZAUTH_REDIRECT_URI!,
-    });
-
-    if (tokenData.access_token) {
-      // Store in secure HttpOnly cookie
-      cookies().set("session", tokenData.access_token, {
-        httpOnly: true,
-        secure: true,
-      });
-      return { success: true };
-    }
-  } catch (error) {
-    return { success: false, error: "Failed to exchange token" };
+    return await tokenService.verify(token, { appKey: process.env.ZAUTH_APP_KEY! });
+  } catch {
+    return null;
   }
 }
 ```
 
-### Server Side Validation (Middleware or Server Components)
-
-```typescript
-// app/auth-check.ts
-"use server";
-
-import { ZAuthTokenService } from "@ziqx/auth";
-import { cookies } from "next/headers";
-
-export async function getSession() {
-  const token = cookies().get("session")?.value;
-  if (!token) return null;
-
-  const tokenService = new ZAuthTokenService();
-  const isValid = await tokenService.validate(token);
-
-  return isValid ? token : null;
-}
-```
-
-## Advanced Next.js Implementation (Real-world Pattern)
-
-This section demonstrates a complete authentication flow using **PKCE**, **Cookies**, and **Server Actions** for a secure production-ready setup.
-
-### 1. SDK Instance Setup
-
-Centralize the `ZAuthClient` configuration.
-
-```typescript
-// services/zauth.ts
-import { ZAuthClient } from "@ziqx/auth";
-
-export const zAuthClient = new ZAuthClient({
-  authKey: process.env.NEXT_PUBLIC_ZIQX_AUTH_APP_KEY!,
-});
-```
-
-### 2. Client-Side Login & State Management
-
-Use a "SaveToken" or "AuthHandler" component to manage redirection and token storage.
-
-```tsx
-"use client";
-
-import { useEffect } from "react";
-import Cookies from "js-cookie";
-import { zAuthClient } from "@/services/zauth";
-import { uidShort } from "@/functions/utils/uuid";
-
-const AuthHandler = ({ redir, token }: { redir?: string; token?: string }) => {
-  useEffect(() => {
-    if (redir) {
-      Cookies.set("redir", redir);
-    }
-
-    if (token) {
-      // Token received from Server Action
-      Cookies.remove("code_challenge");
-      // setAuthToken(token); // Your custom token storage logic
-
-      const redirect = Cookies.get("redir");
-      setTimeout(() => {
-        window.location.replace(redirect || "/console/");
-        if (redirect) Cookies.remove("redir");
-      }, 500);
-    } else {
-      // Trigger new login
-      const challenge = uidShort();
-      Cookies.set("code_challenge", challenge);
-
-      setTimeout(() => {
-        zAuthClient.login({
-          redirectUrl: process.env.NEXT_PUBLIC_ZAUTH_REDIRECT_URL!,
-          codeChallenge: challenge,
-        });
-      }, 1000);
-    }
-  }, [redir, token]);
-
-  return null;
-};
-
-export default AuthHandler;
-```
-
-### 3. Server Action for Token Exchange
-
-Handle the `getAuthToken` exchange on the server to protect your `authSecret`.
-
-```typescript
-// actions/auth.ts
-"use server";
-
-import { ZAuthTokenService } from "@ziqx/auth";
-import { cookies } from "next/headers";
-
-export async function getAccessToken(code?: string) {
-  if (!code) return null;
-
-  const challenge = cookies().get("code_challenge")?.value;
-  if (!challenge) return null;
-
-  const tokenService = new ZAuthTokenService();
-  const tokens = await tokenService.getAuthToken({
-    authAppKey: process.env.ZAUTH_APP_KEY!,
-    authSecret: process.env.ZIQX_AUTH_SECRET!,
-    codeVerifier: challenge,
-    code,
-    redirectUri: process.env.ZAUTH_REDIRECT_URL!,
-  });
-
-  return tokens?.access_token;
-}
-```
-
-### 4. Unified Login Page (Server Component)
-
-The main login page coordinates the Server Action and the Client-side handler.
-
-```tsx
-// app/login/page.tsx
-import AuthHandler from "./AuthHandler";
-import { getAccessToken } from "./actions";
-
-type LoginPageProps = {
-  searchParams: Promise<{ redir: string; code: string }>;
-};
-
-const LoginPage = async ({ searchParams }: LoginPageProps) => {
-  const { redir, code } = await searchParams;
-  const token = await getAccessToken(code);
-
-  return (
-    <div>
-      <AuthHandler redir={redir} token={token} />
-      <main className="h-[100svh] flex items-center justify-center">
-        <p>Authenticating...</p>
-      </main>
-    </div>
-  );
-};
-
-export default LoginPage;
-```
+Claims: `sub` (user's Ziqx open id), `email` (with `email` scope), `username`/`fullname` (with `profile` scope). `phone` is empty for Ziqx Developers apps.
 
 ## Best Practices
 
-1. **Keep Secrets Secret**: Never expose `authSecret` in client-side code or `NEXT_PUBLIC_` environment variables.
-2. **PKCE Flow**: Use unique `codeChallenge` and `codeVerifier` (stored in cookies) to prevent authorization code injection.
-3. **HTTP-Only Cookies**: Store access tokens in `httpOnly` cookies in Next.js for maximum security.
-4. **Environment Variables**: Use `NEXT_PUBLIC_` only for public keys and redirect URLs. Keep `authSecret` strictly server-side.
-5. **Session Validation**: Always validate tokens on the server (e.g., in Middleware) before granting access to protected routes.
+1. **Keep Secrets Secret**: never put the client secret in client code or `NEXT_PUBLIC_` variables.
+2. **S256 PKCE + state**: a fresh verifier and state per sign-in, stored in short-lived httpOnly cookies; check `state` on the callback.
+3. **Exact redirect URL**: the same string in Ziqx Developers, `login`/`getLoginUrl`, and `getAuthToken`.
+4. **HTTP-only cookies** for the access token.
+5. **Verify on the server** with `verify(token, { appKey })` before granting access.
